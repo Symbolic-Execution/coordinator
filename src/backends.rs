@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use reqwest::StatusCode;
+use sha3::{Digest, Keccak256};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -45,6 +47,8 @@ pub trait AuthorizationBackend: Send + Sync {
         handle_id: HandleId,
     ) -> Result<Address, CoordinatorError>;
 }
+
+const DISCLOSURE_CONTROLLER_SIGNATURE: &str = "disclosureController(bytes32)";
 
 #[derive(Clone)]
 pub struct HttpMpcBackend {
@@ -211,6 +215,152 @@ pub async fn decode_json_response<T: serde::de::DeserializeOwned>(
     })
 }
 
+#[derive(Clone)]
+pub struct HttpAuthorizationBackend {
+    client: reqwest::Client,
+    rpc_url: String,
+}
+
+impl HttpAuthorizationBackend {
+    pub fn new(rpc_url: impl Into<String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            rpc_url: rpc_url.into().trim_end_matches('/').to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonRpcRequest<'a, P> {
+    jsonrpc: &'static str,
+    id: u64,
+    method: &'a str,
+    params: P,
+}
+
+#[derive(Serialize)]
+struct EthCallParams<'a> {
+    to: &'a str,
+    data: &'a str,
+}
+
+#[derive(Deserialize)]
+struct JsonRpcResponse<T> {
+    result: Option<T>,
+    error: Option<JsonRpcError>,
+}
+
+#[derive(Deserialize)]
+struct JsonRpcError {
+    code: i64,
+    message: String,
+}
+
+fn hex_encode_prefixed(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+fn encode_disclosure_controller_call(handle_id: HandleId) -> String {
+    let selector = Keccak256::digest(DISCLOSURE_CONTROLLER_SIGNATURE.as_bytes());
+    let mut calldata = Vec::with_capacity(36);
+    calldata.extend_from_slice(&selector[..4]);
+    calldata.extend_from_slice(&handle_id.0);
+    hex_encode_prefixed(&calldata)
+}
+
+fn decode_address_word(result: &str) -> Result<Address, CoordinatorError> {
+    let raw = result.strip_prefix("0x").ok_or_else(|| {
+        CoordinatorError::Forbidden("disclosure controller lookup returned non-hex data".to_string())
+    })?;
+    if raw.len() != 64 {
+        return Err(CoordinatorError::Forbidden(
+            "disclosure controller lookup returned malformed data".to_string(),
+        ));
+    }
+
+    let decoded = hex::decode(raw).map_err(|error| {
+        CoordinatorError::Forbidden(format!(
+            "disclosure controller lookup returned invalid hex: {error}"
+        ))
+    })?;
+    let mut address = [0u8; 20];
+    address.copy_from_slice(&decoded[12..32]);
+    Ok(Address(address))
+}
+
+#[async_trait]
+impl AuthorizationBackend for HttpAuthorizationBackend {
+    async fn resolve_controller(
+        &self,
+        contract: Address,
+        handle_id: HandleId,
+    ) -> Result<Address, CoordinatorError> {
+        let contract = hex_encode_prefixed(&contract.0);
+        let data = encode_disclosure_controller_call(handle_id);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "eth_call",
+            params: (
+                EthCallParams {
+                    to: &contract,
+                    data: &data,
+                },
+                "safe",
+            ),
+        };
+
+        let response = self
+            .client
+            .post(&self.rpc_url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| {
+                CoordinatorError::Unavailable(format!(
+                    "authorization eth_call failed: {error}"
+                ))
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(CoordinatorError::Unavailable(format!(
+                "authorization RPC returned HTTP {}: {}",
+                status.as_u16(),
+                body
+            )));
+        }
+
+        let body: JsonRpcResponse<String> = response.json().await.map_err(|error| {
+            CoordinatorError::Unavailable(format!(
+                "authorization RPC response decode failed: {error}"
+            ))
+        })?;
+
+        if let Some(error) = body.error {
+            return Err(CoordinatorError::Forbidden(format!(
+                "disclosure controller lookup failed: {} ({})",
+                error.message, error.code
+            )));
+        }
+
+        let controller = decode_address_word(&body.result.ok_or_else(|| {
+            CoordinatorError::Unavailable(
+                "authorization RPC response was missing result".to_string(),
+            )
+        })?)?;
+
+        if controller == Address([0u8; 20]) {
+            return Err(CoordinatorError::Forbidden(
+                "handle has no disclosure controller".to_string(),
+            ));
+        }
+
+        Ok(controller)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct InMemoryAuthorizationBackend {
     controllers: Arc<RwLock<HashMap<(Address, HandleId), Address>>>,
@@ -244,5 +394,38 @@ impl AuthorizationBackend for InMemoryAuthorizationBackend {
             .get(&(contract, handle_id))
             .copied()
             .ok_or_else(|| CoordinatorError::NotFound("handle controller not found".to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DISCLOSURE_CONTROLLER_SIGNATURE, decode_address_word,
+        encode_disclosure_controller_call,
+    };
+    use crate::types::{Address, HandleId};
+    use sha3::{Digest, Keccak256};
+
+    #[test]
+    fn disclosure_controller_call_matches_expected_abi_encoding() {
+        let handle_id = HandleId([0x11; 32]);
+        let calldata = encode_disclosure_controller_call(handle_id);
+        let selector = &Keccak256::digest(DISCLOSURE_CONTROLLER_SIGNATURE.as_bytes())[..4];
+        assert_eq!(calldata, format!("0x{}{}", hex::encode(selector), hex::encode(handle_id.0)));
+    }
+
+    #[test]
+    fn decodes_eth_call_address_word() {
+        let decoded = decode_address_word(
+            "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678",
+        )
+        .unwrap();
+        assert_eq!(
+            decoded,
+            Address([
+                0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34,
+                0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78,
+            ])
+        );
     }
 }

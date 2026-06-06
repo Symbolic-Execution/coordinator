@@ -3,7 +3,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use coordinator::api::router;
-use coordinator::backends::{HttpCoprocessorBackend, HttpMpcBackend, InMemoryAuthorizationBackend};
+use coordinator::backends::{
+    HttpAuthorizationBackend, HttpCoprocessorBackend, HttpMpcBackend,
+};
 use coordinator::clock::SystemClock;
 use coordinator::state::{AppState, CoordinatorRuntimeConfig};
 use coordinator::types::Bytes32;
@@ -25,6 +27,8 @@ async fn main() -> ExitCode {
         .unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
     let coprocessor_url = std::env::var("COORDINATOR_COPROCESSOR_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:5000".to_string());
+    let eth_rpc_url = std::env::var("COORDINATOR_ETH_RPC_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8545".to_string());
     let eip712_name =
         std::env::var("COORDINATOR_EIP712_NAME").unwrap_or_else(|_| "Coordinator".to_string());
     let eip712_version =
@@ -43,7 +47,7 @@ async fn main() -> ExitCode {
         },
         Arc::new(HttpMpcBackend::new(mpc_url)),
         Arc::new(HttpCoprocessorBackend::new(coprocessor_url)),
-        Arc::new(InMemoryAuthorizationBackend::new()),
+        Arc::new(HttpAuthorizationBackend::new(eth_rpc_url)),
         Arc::new(SystemClock),
     );
 

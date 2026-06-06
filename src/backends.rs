@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use reqwest::StatusCode;
-use sha3::{Digest, Keccak256};
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -270,7 +270,9 @@ fn encode_disclosure_controller_call(handle_id: HandleId) -> String {
 
 fn decode_address_word(result: &str) -> Result<Address, CoordinatorError> {
     let raw = result.strip_prefix("0x").ok_or_else(|| {
-        CoordinatorError::Forbidden("disclosure controller lookup returned non-hex data".to_string())
+        CoordinatorError::Forbidden(
+            "disclosure controller lookup returned non-hex data".to_string(),
+        )
     })?;
     if raw.len() != 64 {
         return Err(CoordinatorError::Forbidden(
@@ -317,9 +319,7 @@ impl AuthorizationBackend for HttpAuthorizationBackend {
             .send()
             .await
             .map_err(|error| {
-                CoordinatorError::Unavailable(format!(
-                    "authorization eth_call failed: {error}"
-                ))
+                CoordinatorError::Unavailable(format!("authorization eth_call failed: {error}"))
             })?;
 
         let status = response.status();
@@ -400,8 +400,7 @@ impl AuthorizationBackend for InMemoryAuthorizationBackend {
 #[cfg(test)]
 mod tests {
     use super::{
-        DISCLOSURE_CONTROLLER_SIGNATURE, decode_address_word,
-        encode_disclosure_controller_call,
+        DISCLOSURE_CONTROLLER_SIGNATURE, decode_address_word, encode_disclosure_controller_call,
     };
     use crate::types::{Address, HandleId};
     use sha3::{Digest, Keccak256};
@@ -411,7 +410,10 @@ mod tests {
         let handle_id = HandleId([0x11; 32]);
         let calldata = encode_disclosure_controller_call(handle_id);
         let selector = &Keccak256::digest(DISCLOSURE_CONTROLLER_SIGNATURE.as_bytes())[..4];
-        assert_eq!(calldata, format!("0x{}{}", hex::encode(selector), hex::encode(handle_id.0)));
+        assert_eq!(
+            calldata,
+            format!("0x{}{}", hex::encode(selector), hex::encode(handle_id.0))
+        );
     }
 
     #[test]
@@ -423,8 +425,8 @@ mod tests {
         assert_eq!(
             decoded,
             Address([
-                0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34,
-                0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78,
+                0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab,
+                0xcd, 0xef, 0x12, 0x34, 0x56, 0x78,
             ])
         );
     }
